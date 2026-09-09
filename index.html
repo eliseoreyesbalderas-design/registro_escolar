@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="es">
 <head>
@@ -933,6 +934,14 @@ function observacionesFiltradasCanalizacion(alumnoId){
 function canalizacionesFor(alumnoId){
   return (state.canalizaciones[alumnoId] || []).slice().sort((a,b)=> b.fecha.localeCompare(a.fecha));
 }
+/* Distingue "ya se canalizó y sigue vigente" de "hay observaciones nuevas desde la última canalización" */
+function canalizacionAlDia(alumnoId){
+  const canals = canalizacionesFor(alumnoId);
+  if(!canals.length) return false;
+  const cubiertasAntes = (canals[0].observaciones || []).length;
+  const totalActual = observacionesRelevantesCanalizacion(alumnoId).length;
+  return totalActual <= cubiertasAntes;
+}
 function registrarCanalizacion(alumnoId, data){
   if(!state.canalizaciones[alumnoId]) state.canalizaciones[alumnoId] = [];
   const folio = 'TS-' + todayISO().replace(/-/g,'') + '-' + String(state.canalizaciones[alumnoId].length+1).padStart(2,'0');
@@ -1128,6 +1137,9 @@ function doPrint(innerHtml, nombreSugerido){
   root.innerHTML = innerHtml;
   const tituloOriginal = document.title;
   if(nombreSugerido) document.title = nombreSugerido;
+  if(nombreSugerido && state && state.meta){
+    try{ logFileEvent('Generado / impreso', nombreSugerido); }catch(e){}
+  }
   setTimeout(()=>{
     window.print();
     setTimeout(()=>{ document.title = tituloOriginal; }, 800);
@@ -1237,7 +1249,7 @@ const TABS = [
   {id:'riesgo', label:'En riesgo', short:'Riesgo', icon:'ic-alert', badgeFn:()=>activeStudents().filter(a=>riesgoInfo(a).enRiesgo).length},
   {id:'estadisticas', label:'Estadísticas', short:'Stats', icon:'ic-chart'},
   {id:'grupal', label:'Ficha grupal', short:'Grupal', icon:'ic-note'},
-  {id:'reportes', label:'Reportes', short:'Reportes', icon:'ic-file'},
+  {id:'reportes', label:'Reportes', short:'Reportes', icon:'ic-file', badgeFn:()=> alumnosCanalizacionPendiente().length + alumnosSinBoletinEntregado().length},
   {id:'datos', label:'Datos y ciclo', short:'Datos', icon:'ic-settings'},
   {id:'datosio', label:'Importar / Exportar', short:'Archivos', icon:'ic-upload'},
 ];
@@ -1381,6 +1393,15 @@ function renderAll(){
 
 /* ---- Inicio ---- */
 /* Recordatorios pedagógicos: avisos calculados a partir de los datos, para que el docente no tenga que revisar todo manualmente */
+/* Funciones reutilizables de seguimiento pendiente: se usan tanto en los recordatorios de Inicio
+   como en la insignia de la pestaña Reportes, para que ambos siempre digan lo mismo. */
+function alumnosCanalizacionPendiente(){
+  return activeStudents().filter(a=> esCandidatoCanalizacion(a.id) && !canalizacionAlDia(a.id));
+}
+function alumnosSinBoletinEntregado(){
+  return activeStudents().filter(a=> entregasFor(a.id).length===0 && [0,1,2].some(i=>calcMomentoFinal(a.id,i)!==null));
+}
+
 function computeRecordatorios(){
   const avisos = [];
   const cfg = state.config;
@@ -1405,14 +1426,29 @@ function computeRecordatorios(){
   if(riesgoSinObs.length>0){
     avisos.push({icon:'⚠️', texto:`${riesgoSinObs.length} alumno(s) en riesgo no tienen ninguna observación registrada en la bitácora.`, tab:'riesgo'});
   }
-  const candidatosCanal = activos.filter(a=>esCandidatoCanalizacion(a.id));
+  const candidatosCanal = alumnosCanalizacionPendiente();
   if(candidatosCanal.length>0){
-    avisos.push({icon:'🚩', texto:`${candidatosCanal.length} alumno(s) acumulan suficientes observaciones para canalizar a Trabajo Social/Orientación.`, tab:'reportes'});
+    avisos.push({icon:'🚩', texto:`${candidatosCanal.length} alumno(s) requieren canalizarse (o actualizarse) a Trabajo Social/Orientación.`, tab:'reportes'});
   }
-  const pesoTot = pesoTotal();
-  if(pesoTot!==100){
-    avisos.push({icon:'⚖️', texto:`Tus criterios de evaluación suman ${pesoTot}% en vez de 100%.`, tab:'datos'});
+  // Seguimiento hacia los padres: alumnos que nunca han recibido su boletín, y ya hay algo que reportarles.
+  const hayCalifCapturadas = activos.some(a=> [0,1,2].some(i=>calcMomentoFinal(a.id,i)!==null));
+  if(hayCalifCapturadas){
+    const sinBoletin = alumnosSinBoletinEntregado();
+    if(sinBoletin.length>0){
+      avisos.push({icon:'👪', texto:`${sinBoletin.length} alumno(s) nunca han recibido su boletín para padres.`, tab:'reportes'});
+    }
   }
+  // Seguimiento hacia el área administrativa/ATP: que exista al menos un informe general generado en el ciclo.
+  const yaGeneroInformeGeneral = (state.meta.historialArchivos||[]).some(h=> h.archivo && h.archivo.startsWith('Informe_General'));
+  if(hayCalifCapturadas && !yaGeneroInformeGeneral){
+    avisos.push({icon:'🏫', texto:'Aún no has generado ningún Informe general para entregar a la administración escolar.', tab:'reportes'});
+  }
+  state.config.momentos.forEach((m,i)=>{
+    const pesoTot = pesoTotal(i);
+    if(pesoTot!==100){
+      avisos.push({icon:'⚖️', texto:`Los criterios de ${m.nombre} suman ${pesoTot}% en vez de 100%.`, tab:'datos'});
+    }
+  });
   return avisos;
 }
 
@@ -1858,7 +1894,9 @@ function openBajaModal(id){
     </div>
   `);
   document.getElementById('bj-confirm').addEventListener('click', ()=>{
-    a.status='baja'; a.fechaBaja = document.getElementById('bj-fecha').value; a.motivo = document.getElementById('bj-motivo').value;
+    const fechaBaja = document.getElementById('bj-fecha').value;
+    if(a.fechaAlta && fechaBaja < a.fechaAlta){ toast('La fecha de baja no puede ser anterior a la fecha de alta'); return; }
+    a.status='baja'; a.fechaBaja = fechaBaja; a.motivo = document.getElementById('bj-motivo').value;
     saveState(); closeModal(); toast('Baja registrada'); renderAll();
   });
 }
@@ -1882,12 +1920,15 @@ function openAlumnoModal(id){
   document.getElementById('al-confirm').addEventListener('click', ()=>{
     const nombre = document.getElementById('al-nombre').value.trim();
     if(!nombre){ toast('Escribe el nombre del alumno'); return; }
+    const noNuevo = document.getElementById('al-no').value;
+    const yaExiste = state.alumnos.some(x=> String(x.no)===String(noNuevo) && x.id!==id);
+    if(yaExiste){ toast(`El número de lista ${noNuevo} ya lo tiene otro alumno de este grupo`); return; }
     if(editing){
-      a.no = document.getElementById('al-no').value;
+      a.no = noNuevo;
       a.fechaAlta = document.getElementById('al-fecha').value;
       a.nombre = nombre;
     } else {
-      state.alumnos.push({ id:uid(), no: document.getElementById('al-no').value, nombre, status:'activo',
+      state.alumnos.push({ id:uid(), no: noNuevo, nombre, status:'activo',
         fechaAlta: document.getElementById('al-fecha').value, fechaBaja:null, motivo:'' });
     }
     saveState(); closeModal(); toast(editing?'Alumno actualizado':'Alumno agregado'); renderAll();
@@ -3007,15 +3048,39 @@ function fmtDateTime(iso){
   return `${d.getDate()} ${meses[d.getMonth()]} ${d.getFullYear()}, ${hh}:${mm}`;
 }
 
+function calcularUsoAlmacenamiento(){
+  try{ return new Blob([JSON.stringify(appData)]).size; }catch(e){ return 0; }
+}
+function formatoBytes(n){
+  if(n<1024) return `${n} B`;
+  if(n<1024*1024) return `${Math.round(n/1024*10)/10} KB`;
+  return `${Math.round(n/1024/1024*100)/100} MB`;
+}
+
 function renderIO(el){
   const origen = state.meta.origen || {tipo:'desconocido', nombreArchivo:null, fecha:null};
   const historial = state.meta.historialArchivos || [];
+  const LIMITE_REFERENCIA = 5 * 1024 * 1024; // 5 MB: límite típico y conservador de almacenamiento local por navegador
+  const usoBytes = calcularUsoAlmacenamiento();
+  const usoPct = Math.min(100, Math.round((usoBytes/LIMITE_REFERENCIA)*1000)/10);
+  const usoColor = usoPct>80 ? 'var(--brick)' : usoPct>50 ? 'var(--amber)' : 'var(--good)';
   el.innerHTML = `
   <div class="card" style="margin-bottom:18px; background:var(--primary-tint); border-color:var(--primary-tint);">
     <h3 style="font-size:15.5px;margin-bottom:8px; color:var(--primary-dark);">📍 ¿Dónde se está guardando todo esto?</h3>
     <p style="font-size:13px; color:var(--primary-dark); line-height:1.6; margin-bottom:0;">
       Esta información <b>no vive en un archivo de Excel o CSV</b> en tu computadora — vive en la memoria interna de <b>este navegador, en este dispositivo</b> (lo que se llama "almacenamiento local"). Los archivos CSV y JSON solo se usan cuando tú decides <b>exportar</b> (sacar una copia) o <b>importar</b> (traer datos de un archivo hacia aquí). Si cambias de navegador, de celular o borras los datos de navegación, esta información no viajará sola — por eso conviene exportar un respaldo de vez en cuando.
     </p>
+  </div>
+
+  <div class="card" style="margin-bottom:18px;">
+    <div class="section-title" style="margin-bottom:8px;">
+      <h3 style="font-size:14.5px; margin:0;">Espacio usado por todos tus grupos</h3>
+      <span style="font-size:12.5px; font-weight:700; color:${usoColor};">${formatoBytes(usoBytes)}</span>
+    </div>
+    <div style="background:var(--surface-2); border-radius:20px; height:8px; overflow:hidden;">
+      <div style="width:${usoPct}%; height:100%; background:${usoColor}; border-radius:20px;"></div>
+    </div>
+    <p class="hint" style="margin:8px 0 0;">${usoPct>80? '⚠️ Te estás acercando al límite típico de almacenamiento del navegador. Exporta un respaldo y, si puedes, borra grupos de ciclos anteriores que ya no necesites tener abiertos aquí.' : 'Referencia orientativa sobre 5 MB, el límite típico por navegador. Con esta cantidad de grupos y datos, vas holgado(a).'}</p>
   </div>
 
   <div class="grid grid-2" style="margin-bottom:18px;">
