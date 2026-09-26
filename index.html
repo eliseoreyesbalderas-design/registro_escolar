@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="es">
 <head>
@@ -595,6 +594,7 @@ function switchGroup(id){
   reportAlumno = null; // evita referenciar a un alumno del grupo anterior
   canalizacionSolicita = []; canalizacionNotas = ''; canalizacionFiltro='todas'; canalizacionDesde=''; canalizacionHasta='';
   fichaScope='general'; fichaMomentoSel=0; fichaDesde=''; fichaHasta='';
+  seguimientoScope='general'; seguimientoMomentoSel=0; seguimientoDesde=''; seguimientoHasta='';
   saveState(true);
   currentTab = 'inicio';
   renderAll();
@@ -609,6 +609,7 @@ function createGroup(groupState, label){
   reportAlumno = null;
   canalizacionSolicita = []; canalizacionNotas = ''; canalizacionFiltro='todas'; canalizacionDesde=''; canalizacionHasta='';
   fichaScope='general'; fichaMomentoSel=0; fichaDesde=''; fichaHasta='';
+  seguimientoScope='general'; seguimientoMomentoSel=0; seguimientoDesde=''; seguimientoHasta='';
   saveState(true);
   return entry;
 }
@@ -2044,6 +2045,82 @@ function buildCanalizacionHTML(alumnoId, folio, fecha, observacionesIncluidas, s
   `;
 }
 
+/* ---- Concentrado de calificaciones: los 3 momentos + recuperaciones + promedio general, para todo el grupo ---- */
+function buildConcentradoHTML(){
+  const cfg = state.config;
+  const activos = activeStudents().sort((a,b)=>Number(a.no)-Number(b.no));
+  const filas = activos.map(a=>{
+    const finals = [0,1,2].map(i=>calcMomentoFinal(a.id,i));
+    const usoRecup = [0,1,2].map(i=>{
+      const g = (state.calificaciones[a.id]||{})[i];
+      return !!(g && g.recuperacion!==undefined && g.recuperacion!=='');
+    });
+    const prom = calcPromedioGeneral(a.id);
+    const niv = nivelDe(prom);
+    return {a, finals, usoRecup, prom, niv};
+  });
+  return `
+    ${reportHeaderHTML('Concentrado de calificaciones y recuperaciones', 'CON')}
+    <p style="font-size:11.5px; color:#5C6D66; margin-bottom:12px;">Cuando un alumno presenta recuperación en un momento, la calificación mostrada ya es la más alta entre la evaluación ordinaria y la recuperación — así es como se calcula también su promedio general.</p>
+    <div class="table-wrap"><table><thead><tr><th>No.</th><th>Alumno</th><th>${esc(cfg.momentos[0].nombre)}</th><th>${esc(cfg.momentos[1].nombre)}</th><th>${esc(cfg.momentos[2].nombre)}</th><th>Promedio general</th><th>Nivel</th></tr></thead>
+    <tbody>${filas.map(r=>`<tr><td>${r.a.no}</td><td>${r.a.nombre}</td>
+      ${r.finals.map((f,i)=>`<td>${f??'—'}${r.usoRecup[i]?' <b style="color:var(--amber);">(R)</b>':''}</td>`).join('')}
+      <td style="font-weight:800; color:${r.prom!==null&&r.prom<6?'var(--brick)':'var(--primary)'}">${r.prom??'—'}</td>
+      <td>${r.niv?r.niv.nombre:'—'}</td></tr>`).join('')}</tbody></table></div>
+    <p style="font-size:10.5px; color:#8A9994; margin-top:8px;">(R) = la calificación de ese momento corresponde a una evaluación de recuperación.</p>
+    <div style="display:flex; flex-wrap:wrap; justify-content:center; gap:20px; margin-top:40px; text-align:center; font-size:12px;">
+      <div>________________________<br>Profesor(a)</div>
+      <div>________________________<br>Director(a)</div>
+    </div>
+  `;
+}
+
+/* ---- Reporte de seguimiento: datos del alumno + asistencia + observaciones, SIN calificaciones ---- */
+function buildSeguimientoHTML(alumnoId, opciones){
+  opciones = opciones || {scope:'general'};
+  const a = state.alumnos.find(x=>x.id===alumnoId);
+  if(!a) return '<p>Alumno no encontrado.</p>';
+  const cfg = state.config;
+
+  let obs = observacionesFor(a.id);
+  let alcanceTxt = 'Historial completo';
+  if(opciones.scope==='momento' && opciones.momentoIdx!==undefined && opciones.momentoIdx!==null){
+    const idx = opciones.momentoIdx;
+    const m = cfg.momentos[idx];
+    obs = obs.filter(o=> o.momento===idx || (o.fecha>=m.inicio && o.fecha<=m.fin));
+    alcanceTxt = `Solo ${m.nombre}`;
+  } else if(opciones.scope==='fecha'){
+    obs = obs.filter(o=> (!opciones.desde || o.fecha>=opciones.desde) && (!opciones.hasta || o.fecha<=opciones.hasta));
+    alcanceTxt = `Del ${opciones.desde?fmtDate(opciones.desde):'inicio del ciclo'} al ${opciones.hasta?fmtDate(opciones.hasta):'hoy'}`;
+  }
+
+  return `
+    ${reportHeaderHTML('Reporte de seguimiento académico y de asistencia', 'SEG')}
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; flex-wrap:wrap; gap:8px;">
+      <div><h3 style="margin-bottom:2px;">${a.no}. ${esc(a.nombre)}</h3>
+        <span style="font-size:12.5px; color:var(--ink-faint)">${a.status==='activo'?'Activo':'Baja'} · Alta: ${fmtDate(a.fechaAlta)}${a.fechaBaja?(' · Baja: '+fmtDate(a.fechaBaja)):''}</span></div>
+    </div>
+    <p style="font-size:11px; color:var(--ink-faint); margin-bottom:12px;">Este reporte no incluye calificaciones. Alcance de las observaciones: <b>${alcanceTxt}</b>.</p>
+    <h3>Asistencia por momento</h3>
+    <div class="table-wrap"><table><thead><tr><th>Momento</th><th>Periodo</th><th>Días de clase</th><th>Faltas</th><th>% Asistencia</th></tr></thead>
+    <tbody>${cfg.momentos.map((m,i)=>{
+      const dias = diasEnMomento(i).length;
+      const faltas = faltasEnMomento(a.id,i);
+      const pct = asistenciaPct(a.id,i);
+      return `<tr><td>${m.nombre}</td><td>${mesesRango(m.inicio,m.fin)}</td><td>${dias}</td><td>${faltas}</td><td>${pct!==null?pct+'%':'—'}</td></tr>`;
+    }).join('')}</tbody></table></div>
+    <h3>Observaciones registradas <span style="font-size:11px; font-weight:400; color:var(--ink-faint);">(${alcanceTxt})</span></h3>
+    ${obs.length? obs.map(o=>`<div style="border:1px solid #DCE6E0;border-radius:8px;padding:8px 10px;margin-bottom:6px;">
+      <div style="font-size:11px;color:#8A9994;display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px;"><span>${fmtDate(o.fecha)}${o.momento!==null&&o.momento!==undefined?(' · '+cfg.momentos[o.momento].nombre):''}</span><span class="chip" style="white-space:normal;">${o.tipo}</span></div>
+      <div style="font-size:12.5px;margin-top:3px;">${esc(o.texto)}</div>
+    </div>`).join('') : '<p style="font-size:12.5px;color:#8A9994;">Sin observaciones registradas en este alcance.</p>'}
+    <div style="display:flex; flex-wrap:wrap; justify-content:center; gap:20px; margin-top:50px; text-align:center; font-size:12px;">
+      <div>________________________<br>Padre, madre o tutor</div>
+      <div>________________________<br>Profesor(a)</div>
+    </div>
+  `;
+}
+
 function buildTraspasoHTML(){
   const cfg = state.config;
   const activos = activeStudents();
@@ -2770,6 +2847,10 @@ let fichaScope = 'general'; // 'general' | 'momento' | 'fecha'
 let fichaMomentoSel = 0;
 let fichaDesde = '';
 let fichaHasta = '';
+let seguimientoScope = 'general';
+let seguimientoMomentoSel = 0;
+let seguimientoDesde = '';
+let seguimientoHasta = '';
 
 function buildGeneralReportHTML(){
   const cfg = state.config;
@@ -2874,11 +2955,13 @@ function buildParcialReportHTML(idx){
 
 function renderReportes(el){
   el.innerHTML = `
-  <p class="hint">Genera el informe que necesites: un resumen general del ciclo, un corte de un solo momento, la ficha técnica de un alumno, un boletín para padres, el traspaso de continuidad, o una canalización a Trabajo Social/Orientación.</p>
+  <p class="hint">Genera el informe que necesites: un resumen general del ciclo, un corte de un solo momento, un concentrado de calificaciones, la ficha técnica de un alumno, un reporte de seguimiento sin calificaciones, un boletín para padres, el traspaso de continuidad, o una canalización a Trabajo Social/Orientación.</p>
   <div class="pill-tabs" id="repTipoPills">
     <button class="pill-tab ${reportTipo==='general'?'active':''}" data-t="general">Informe general</button>
     <button class="pill-tab ${reportTipo==='parcial'?'active':''}" data-t="parcial">Parcial por momento</button>
+    <button class="pill-tab ${reportTipo==='concentrado'?'active':''}" data-t="concentrado">Concentrado de calificaciones</button>
     <button class="pill-tab ${reportTipo==='individual'?'active':''}" data-t="individual">Ficha por alumno</button>
+    <button class="pill-tab ${reportTipo==='seguimiento'?'active':''}" data-t="seguimiento">Seguimiento sin calificaciones</button>
     <button class="pill-tab ${reportTipo==='padres'?'active':''}" data-t="padres">Boletín para padres</button>
     <button class="pill-tab ${reportTipo==='traspaso'?'active':''}" data-t="traspaso">Traspaso de continuidad</button>
     <button class="pill-tab ${reportTipo==='canalizacion'?'active':''}" data-t="canalizacion">Canalización</button>
@@ -2923,6 +3006,26 @@ function renderReportes(el){
     const fd = document.getElementById('ficha-desde'), fh = document.getElementById('ficha-hasta');
     if(fd) fd.addEventListener('change', e=>{ fichaDesde=e.target.value; renderReportes(el); });
     if(fh) fh.addEventListener('change', e=>{ fichaHasta=e.target.value; renderReportes(el); });
+  } else if(reportTipo==='seguimiento'){
+    const list = state.alumnos.slice().sort((a,b)=>Number(a.no)-Number(b.no));
+    if(!reportAlumno && list.length) reportAlumno = list[0].id;
+    const scopeLabel = {general:'General (todo el ciclo)', momento:'Solo un momento', fecha:'Rango de fechas'};
+    sub.innerHTML = `
+      <div class="field" style="max-width:340px;"><select id="repAlumnoSel">${list.map(a=>`<option value="${a.id}" ${a.id===reportAlumno?'selected':''}>${a.no}. ${a.nombre}</option>`).join('')}</select></div>
+      <h4 style="font-size:12.5px; margin:10px 0 6px; text-transform:uppercase; letter-spacing:.03em; color:var(--ink-soft);">¿Qué observaciones incluir?</h4>
+      <div class="pill-tabs" id="seguimientoScopePills" style="margin-bottom:8px;">
+        ${['general','momento','fecha'].map(sc=>`<button class="pill-tab ${seguimientoScope===sc?'active':''}" data-sscope="${sc}">${scopeLabel[sc]}</button>`).join('')}
+      </div>
+      ${seguimientoScope==='momento' ? `<div class="pill-tabs" style="margin-bottom:0;">${state.config.momentos.map((m,i)=>`<button class="pill-tab ${seguimientoMomentoSel===i?'active':''}" data-smom="${i}">${m.nombre}</button>`).join('')}</div>` : ''}
+      ${seguimientoScope==='fecha' ? `<div class="grid grid-2"><div class="field" style="margin-bottom:0;"><label>Desde</label><input type="date" id="seguimiento-desde" value="${seguimientoDesde}"></div><div class="field" style="margin-bottom:0;"><label>Hasta</label><input type="date" id="seguimiento-hasta" value="${seguimientoHasta}"></div></div>` : ''}
+    `;
+    const s = document.getElementById('repAlumnoSel');
+    if(s) s.addEventListener('change', ()=>{ reportAlumno=s.value; seguimientoScope='general'; seguimientoMomentoSel=0; seguimientoDesde=''; seguimientoHasta=''; renderReportes(el); });
+    sub.querySelectorAll('[data-sscope]').forEach(b=>b.addEventListener('click', ()=>{ seguimientoScope=b.dataset.sscope; renderReportes(el); }));
+    sub.querySelectorAll('[data-smom]').forEach(b=>b.addEventListener('click', ()=>{ seguimientoMomentoSel=Number(b.dataset.smom); renderReportes(el); }));
+    const sd = document.getElementById('seguimiento-desde'), sh = document.getElementById('seguimiento-hasta');
+    if(sd) sd.addEventListener('change', e=>{ seguimientoDesde=e.target.value; renderReportes(el); });
+    if(sh) sh.addEventListener('change', e=>{ seguimientoHasta=e.target.value; renderReportes(el); });
   } else if(reportTipo==='traspaso'){
     sub.innerHTML = `<div class="helpbox" style="margin-bottom:0;"><svg><use href="#ic-info"/></svg><div>Se incluyen automáticamente los alumnos activos con Índice de Riesgo Escolar por debajo de 50 (riesgo alto o crítico) — combina bajo rendimiento, faltas críticas, tendencia y observaciones.</div></div>`;
   } else if(reportTipo==='canalizacion'){
@@ -2943,6 +3046,8 @@ function renderReportes(el){
   let html;
   if(reportTipo==='general') html = buildGeneralReportHTML();
   else if(reportTipo==='parcial') html = buildParcialReportHTML(reportMomento);
+  else if(reportTipo==='concentrado') html = state.alumnos.length ? buildConcentradoHTML() : '<p class="hint">Agrega alumnos primero para generar el concentrado.</p>';
+  else if(reportTipo==='seguimiento') html = state.alumnos.length ? buildSeguimientoHTML(reportAlumno, {scope:seguimientoScope, momentoIdx:seguimientoMomentoSel, desde:seguimientoDesde, hasta:seguimientoHasta}) : '<p class="hint">Agrega alumnos primero para generar su reporte de seguimiento.</p>';
   else if(reportTipo==='padres') html = state.alumnos.length ? buildBoletinPadresHTML(reportAlumno) : '<p class="hint">Agrega alumnos primero para generar su boletín.</p>';
   else if(reportTipo==='traspaso') html = buildTraspasoHTML();
   else if(reportTipo==='canalizacion'){
@@ -3021,10 +3126,13 @@ function renderReportes(el){
       const g = `${state.config.grado}${state.config.grupo}`;
       const nombreAl = ()=> { const al = state.alumnos.find(x=>x.id===reportAlumno); return al?limpiarNombreArchivo(al.nombre):'Alumno'; };
       const fichaAlcanceTxt = fichaScope==='momento' ? limpiarNombreArchivo(state.config.momentos[fichaMomentoSel].nombre) : fichaScope==='fecha' ? 'Rango' : 'General';
+      const seguimientoAlcanceTxt = seguimientoScope==='momento' ? limpiarNombreArchivo(state.config.momentos[seguimientoMomentoSel].nombre) : seguimientoScope==='fecha' ? 'Rango' : 'General';
       const nombresPorTipo = {
         general: `Informe_General_${g}_${todayISO()}`,
         parcial: `Informe_Parcial_${limpiarNombreArchivo(state.config.momentos[reportMomento].nombre)}_${g}_${todayISO()}`,
+        concentrado: `Concentrado_Calificaciones_${g}_${todayISO()}`,
         individual: `Ficha_Tecnica_${nombreAl()}_${fichaAlcanceTxt}_${g}_${todayISO()}`,
+        seguimiento: `Seguimiento_${nombreAl()}_${seguimientoAlcanceTxt}_${g}_${todayISO()}`,
         padres: `Boletin_Padres_${nombreAl()}_${g}_${todayISO()}`,
         traspaso: `Traspaso_Continuidad_${g}_${todayISO()}`,
       };
@@ -3245,6 +3353,7 @@ function renderIO(el){
         state = appData.groups[appData.activeGroupId].state;
         reportAlumno = null; canalizacionSolicita=[]; canalizacionNotas=''; canalizacionFiltro='todas'; canalizacionDesde=''; canalizacionHasta='';
         fichaScope='general'; fichaMomentoSel=0; fichaDesde=''; fichaHasta='';
+        seguimientoScope='general'; seguimientoMomentoSel=0; seguimientoDesde=''; seguimientoHasta='';
         logFileEvent('Restaurado — todos los grupos (JSON)', nombreArchivo);
         saveState(); toast(`Restaurados ${n} grupo(s)`); currentTab='inicio'; renderAll();
       } else if(esUnGrupo){
